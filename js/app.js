@@ -125,19 +125,22 @@ async function pullFromSheets(silent = false) {
 
   let changed = false;
 
-  if (res.clients && JSON.stringify(res.clients) !== JSON.stringify(STATE.clients)) {
+  // Rule: Sheets only wins if it has MORE items than local, or local is empty.
+  // This prevents a partial Sheets upload from wiping a full local catalog.
+  if (res.clients && res.clients.length > STATE.clients.length) {
     STATE.clients = res.clients; saveLocal('clients'); changed = true;
   }
-  if (res.materials && res.materials.length > 0 && JSON.stringify(res.materials) !== JSON.stringify(STATE.materials)) {
+  if (res.materials && res.materials.length > STATE.materials.length) {
     STATE.materials = res.materials; saveLocal('materials'); changed = true;
   }
-  if (res.laborRates && JSON.stringify(res.laborRates) !== JSON.stringify(STATE.laborRates)) {
+  if (res.laborRates && res.laborRates.length > STATE.laborRates.length) {
     STATE.laborRates = res.laborRates; saveLocal('laborRates'); changed = true;
   }
-  if (res.recentDocs && JSON.stringify(res.recentDocs) !== JSON.stringify(STATE.recentDocs)) {
+  if (res.recentDocs && res.recentDocs.length > STATE.recentDocs.length) {
     STATE.recentDocs = res.recentDocs; saveLocal('recentDocs'); changed = true;
   }
-  if (res.counters && JSON.stringify(res.counters) !== JSON.stringify(STATE.counters)) {
+  // Counter: take whichever seq is higher (prevents duplicate doc numbers)
+  if (res.counters && res.counters.seq > STATE.counters.seq) {
     STATE.counters = res.counters; saveLocal('counters'); changed = true;
   }
   if (res.markup) {
@@ -158,10 +161,26 @@ async function pullFromSheets(silent = false) {
     if (!silent) showToast('Al día — sin cambios');
   }
 
-  // Show last sync time in topbar
   const now = new Date();
   const t = now.toLocaleTimeString('es-PR', { hour: '2-digit', minute: '2-digit' });
   document.getElementById('syncLabel').textContent = `Sync ${t}`;
+}
+
+// Push the full local catalog up to Sheets (used after bulk import)
+async function writeAllToSheets() {
+  if (!STATE.gasUrl) return;
+  showToast('Subiendo a Sheets…');
+  // Clear and rewrite Materials sheet
+  await gasRequest('clearSheet', { sheet: 'Materials' });
+  for (let i = 0; i < STATE.materials.length; i += 50) {
+    await gasRequest('appendBatch', { sheet: 'Materials', rows: STATE.materials.slice(i, i + 50) });
+  }
+  // Clear and rewrite LaborRates sheet
+  await gasRequest('clearSheet', { sheet: 'LaborRates' });
+  for (let i = 0; i < STATE.laborRates.length; i += 50) {
+    await gasRequest('appendBatch', { sheet: 'LaborRates', rows: STATE.laborRates.slice(i, i + 50) });
+  }
+  showToast(`${STATE.materials.length} materiales + ${STATE.laborRates.length} tarifas subidas a Sheets ✓`);
 }
 
 async function pushToSheets(sheet, row) {
@@ -553,15 +572,8 @@ async function importMaterials(event) {
   showToast(`${added} materiales importados${skipped ? `, ${skipped} ya existían` : ''} ✓`);
   event.target.value = '';
 
-  // Push to Sheets in background after local save is done (fire and forget)
-  if (STATE.gasUrl && added > 0) {
-    const newItems = STATE.materials.slice(-added);
-    // Batch into groups of 50 to avoid timeout
-    for (let i = 0; i < newItems.length; i += 50) {
-      const batch = newItems.slice(i, i + 50);
-      await gasRequest('appendBatch', { sheet: 'Materials', rows: batch });
-    }
-  }
+  // Push the FULL catalog to Sheets (overwrites any partial data there)
+  if (STATE.gasUrl) await writeAllToSheets();
 }
 
 // ── IMPORT LABOR RATES ───────────────────────────────────────
@@ -597,11 +609,8 @@ async function importLaborRates(event) {
   showToast(`${added} tarifas importadas${skipped ? `, ${skipped} ya existían` : ''} ✓`);
   event.target.value = '';
 
-  // Background sync to Sheets
-  if (STATE.gasUrl && added > 0) {
-    const newRates = STATE.laborRates.slice(-added);
-    await gasRequest('appendBatch', { sheet: 'LaborRates', rows: newRates });
-  }
+  // Push the FULL catalog to Sheets
+  if (STATE.gasUrl) await writeAllToSheets();
 }
 
 function openMaterialPicker() {
