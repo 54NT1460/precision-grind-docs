@@ -120,7 +120,7 @@ async function forcSync() {
 }
 
 async function pullFromSheets(silent = false, force = false) {
-  // Step 1: get counters, docs, clients, markup (small data — safe in one call)
+  // Step 1: small data — clients, docs, counters, markup
   const res = await gasRequest('getAll');
   if (!res) {
     if (!silent) showToast('Sin conexión con Sheets', true);
@@ -129,20 +129,18 @@ async function pullFromSheets(silent = false, force = false) {
 
   let changed = false;
 
-  // Clients — always safe to sync (small)
   if (res.clients && Array.isArray(res.clients)) {
+    // force=true: always replace. force=false: only if Sheets has more
     if (force || res.clients.length > STATE.clients.length) {
       STATE.clients = res.clients; saveLocal('clients'); changed = true;
     }
   }
-  // Recent docs — take more
   if (res.recentDocs && Array.isArray(res.recentDocs)) {
     if (force || res.recentDocs.length > STATE.recentDocs.length) {
       STATE.recentDocs = res.recentDocs; saveLocal('recentDocs'); changed = true;
     }
   }
-  // Counter — always take highest seq
-  if (res.counters && res.counters.seq > STATE.counters.seq) {
+  if (res.counters && (force || res.counters.seq > STATE.counters.seq)) {
     STATE.counters = res.counters; saveLocal('counters'); changed = true;
   }
   if (res.markup) {
@@ -155,7 +153,7 @@ async function pullFromSheets(silent = false, force = false) {
     }
   }
 
-  // Step 2: fetch Materials separately (large — dedicated call)
+  // Step 2: Materials — separate call (avoids URL size limit)
   const matRes = await gasRequest('getSheet', { sheet: 'Materials' });
   if (matRes && Array.isArray(matRes.rows) && matRes.rows.length > 0) {
     if (force || matRes.rows.length > STATE.materials.length) {
@@ -163,7 +161,7 @@ async function pullFromSheets(silent = false, force = false) {
     }
   }
 
-  // Step 3: fetch LaborRates separately
+  // Step 3: LaborRates — separate call
   const labRes = await gasRequest('getSheet', { sheet: 'LaborRates' });
   if (labRes && Array.isArray(labRes.rows) && labRes.rows.length > 0) {
     if (force || labRes.rows.length > STATE.laborRates.length) {
@@ -174,9 +172,17 @@ async function pullFromSheets(silent = false, force = false) {
   if (changed) {
     renderAllLists();
     updateDocNumber();
-    if (!silent) showToast(`Sincronizado — ${STATE.materials.length} mat · ${STATE.laborRates.length} tarifas ✓`);
-  } else {
-    if (!silent) showToast(`Al día — ${STATE.materials.length} mat · ${STATE.laborRates.length} tarifas`);
+  }
+
+  const mat = STATE.materials.length;
+  const lab = STATE.laborRates.length;
+  const cli = STATE.clients.length;
+
+  if (!silent) {
+    showToast(changed
+      ? `Sincronizado ✓ — ${mat} mat · ${lab} tarifas · ${cli} clientes`
+      : `Al día — ${mat} mat · ${lab} tarifas · ${cli} clientes`
+    );
   }
 
   const now = new Date();
@@ -370,25 +376,12 @@ function calcFacTotal() {
 // ── CLIENTS ──────────────────────────────────────────────────
 function openClientModal() {
   ['m-cname','m-cphone','m-cemail','m-caddress'].forEach(id => document.getElementById(id).value = '');
+  document.getElementById('modal-client-title').textContent = 'Nuevo Cliente';
+  document.getElementById('modal-client-save').textContent = 'Guardar';
+  document.getElementById('modal-client-save').removeAttribute('data-edit-id');
   document.getElementById('modal-client').classList.add('open');
 }
 
-async function saveClient() {
-  const client = {
-    id: Date.now(),
-    name:    document.getElementById('m-cname').value.trim(),
-    phone:   document.getElementById('m-cphone').value.trim(),
-    email:   document.getElementById('m-cemail').value.trim(),
-    address: document.getElementById('m-caddress').value.trim(),
-  };
-  if (!client.name) { showToast('Ingresa el nombre del cliente', true); return; }
-  STATE.clients.push(client);
-  saveLocal('clients');
-  if (STATE.gasUrl) await pushToSheets('Clients', client);
-  renderAllLists();
-  closeModal('client');
-  showToast('Cliente guardado ✓');
-}
 
 function loadClientCot() {
   const sel = document.getElementById('cot-clientSelect');
@@ -439,26 +432,69 @@ function renderClientList() {
     <div class="client-item">
       <div>
         <div class="client-name">${c.name}</div>
-        <div class="client-detail">${c.phone} · ${c.email}</div>
-        <div class="client-detail">${c.address}</div>
+        <div class="client-detail">${c.phone || '—'} · ${c.email || '—'}</div>
+        <div class="client-detail">${c.address || '—'}</div>
       </div>
-      <button class="btn btn-ghost btn-sm" onclick="deleteClient(${c.id})">Eliminar</button>
+      <div style="display:flex;gap:6px">
+        <button class="btn btn-ghost btn-sm" onclick="openEditClient(${c.id})">✏️</button>
+        <button class="btn btn-ghost btn-sm" style="color:var(--accent)" onclick="deleteClient(${c.id})">✕</button>
+      </div>
     </div>
   `).join('');
 }
 
 function deleteClient(id) {
-  if (!confirm('¿Eliminar este cliente?')) return;
+  // No confirm() — Safari iOS blocks it. Button tap is intentional enough.
   STATE.clients = STATE.clients.filter(c => c.id !== id);
   saveLocal('clients');
   renderAllLists();
-  // Delete from Sheets by id, then overwrite to ensure clean state
-  if (STATE.gasUrl) {
-    gasRequest('deleteRow', { sheet: 'Clients', id }).then(() => {
-      // No further action needed — row deleted directly
-    });
-  }
+  if (STATE.gasUrl) gasRequest('deleteRow', { sheet: 'Clients', id });
   showToast('Cliente eliminado');
+}
+
+function openEditClient(id) {
+  const c = STATE.clients.find(x => x.id === id);
+  if (!c) return;
+  document.getElementById('m-cname').value = c.name || '';
+  document.getElementById('m-cphone').value = c.phone || '';
+  document.getElementById('m-cemail').value = c.email || '';
+  document.getElementById('m-caddress').value = c.address || '';
+  document.getElementById('modal-client-title').textContent = 'Editar Cliente';
+  document.getElementById('modal-client-save').setAttribute('data-edit-id', id);
+  document.getElementById('modal-client-save').textContent = 'Actualizar';
+  document.getElementById('modal-client').classList.add('open');
+}
+
+async function saveClient() {
+  const editId = parseInt(document.getElementById('modal-client-save').getAttribute('data-edit-id') || '0');
+  const isEdit = !!editId;
+
+  const data = {
+    id: isEdit ? editId : Date.now(),
+    name:    document.getElementById('m-cname').value.trim(),
+    phone:   document.getElementById('m-cphone').value.trim(),
+    email:   document.getElementById('m-cemail').value.trim(),
+    address: document.getElementById('m-caddress').value.trim(),
+  };
+  if (!data.name) { showToast('Ingresa el nombre del cliente', true); return; }
+
+  if (isEdit) {
+    STATE.clients = STATE.clients.map(c => c.id === editId ? data : c);
+    saveLocal('clients');
+    if (STATE.gasUrl) {
+      await gasRequest('deleteRow', { sheet: 'Clients', id: editId });
+      await pushToSheets('Clients', data);
+    }
+    showToast('Cliente actualizado ✓');
+  } else {
+    STATE.clients.push(data);
+    saveLocal('clients');
+    if (STATE.gasUrl) await pushToSheets('Clients', data);
+    showToast('Cliente guardado ✓');
+  }
+
+  renderAllLists();
+  closeModal('client');
 }
 
 // ── MATERIALS ────────────────────────────────────────────────
