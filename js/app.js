@@ -739,6 +739,21 @@ async function saveDoc(type) {
 }
 
 // ── SETTINGS ─────────────────────────────────────────────────
+function setCounter() {
+  const input = document.getElementById('counterInput');
+  const val = parseInt(input.value);
+  if (!val || val < 1 || val > 99) {
+    showToast('Ingresa un número entre 1 y 99', true);
+    return;
+  }
+  STATE.counters.seq = val;
+  saveLocal('counters');
+  if (STATE.gasUrl) gasRequest('setCounter', STATE.counters);
+  updateDocNumber();
+  input.value = '';
+  showToast(`Contador ajustado → ${docNumString()} ✓`);
+}
+
 function saveMarkup() {
   STATE.markup = parseFloat(document.getElementById('markupInput').value) || 25;
   saveLocal('markup');
