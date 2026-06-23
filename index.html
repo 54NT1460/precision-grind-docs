@@ -8,6 +8,7 @@
 <link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Fraunces:ital,opsz,wght@0,9..144,300;0,9..144,700;1,9..144,300&family=Syne:wght@400;600;700;800&display=swap" rel="stylesheet">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/JsBarcode/3.11.5/JsBarcode.all.min.js"></script>
 <style>
   :root {
     --ink: #1a1a18;
@@ -679,6 +680,10 @@
         <svg fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-10L4 7m8 4v10M4 7v10l8 4"/></svg>
         Materiales
       </div>
+      <div class="nav-item" data-view="labels" onclick="showView('labels')">
+        <svg fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 7h.01M7 3h5c.512 0 1.024.195 1.414.586l7 7a2 2 0 010 2.828l-7 7a2 2 0 01-2.828 0l-7-7A1.994 1.994 0 013 12V7a4 4 0 014-4z"/></svg>
+        Etiquetas
+      </div>
       <div class="nav-item" data-view="labor" onclick="showView('labor')">
         <svg fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"/><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/></svg>
         Tarifas Labor
@@ -1097,13 +1102,50 @@
     <div class="view" id="view-materials">
       <div class="page-header">
         <div><div class="page-title">Materiales</div><div class="page-sub">Catálogo con precios HD Mayagüez</div></div>
-        <button class="btn btn-primary btn-sm" onclick="openMaterialModal()">+ Nuevo</button>
+        <div style="display:flex;gap:8px">
+          <button class="btn btn-ghost btn-sm" onclick="document.getElementById('importFile').click()">📥 Importar</button>
+          <button class="btn btn-primary btn-sm" onclick="openMaterialModal()">+ Nuevo</button>
+        </div>
       </div>
+      <input type="file" id="importFile" accept=".json" style="display:none" onchange="importMaterials(event)">
       <div class="alert alert-info">
         Ingresa el <strong>precio de Home Depot</strong> — el sistema aplica IVU (×1.115) y markup (<span id="markupDisplay">25</span>%) automáticamente.
       </div>
+      <div class="card" style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+        <input id="materialSearch" type="text" placeholder="🔍 Buscar material o SKU…" style="flex:1;min-width:200px" oninput="renderMaterialList()">
+        <select id="vendorFilter" onchange="renderMaterialList()" style="width:auto;min-width:140px">
+          <option value="">Todos los proveedores</option>
+          <option value="HD">Home Depot</option>
+          <option value="HQJ">HQJ Plumbing</option>
+          <option value="Otro">Otro</option>
+        </select>
+        <button class="btn btn-steel btn-sm" onclick="showView('labels')">🏷 Imprimir Etiquetas</button>
+      </div>
       <div class="card">
         <div id="materialList"><div style="color:var(--muted);font-size:13px;">Sin materiales en catálogo.</div></div>
+      </div>
+    </div>
+
+    <!-- ── LABELS ── -->
+    <div class="view" id="view-labels">
+      <div class="page-header">
+        <div><div class="page-title">Imprimir Etiquetas</div><div class="page-sub">Hojas de etiquetas con código de barras — para Zebra u otra impresora</div></div>
+        <button class="btn btn-ghost btn-sm" onclick="showView('materials')">← Atrás</button>
+      </div>
+      <div class="alert alert-info">
+        Selecciona los materiales a imprimir. Cada etiqueta es de 4"×2" con nombre, SKU, precio y código de barras escaneable (Code128).
+      </div>
+      <div class="card">
+        <div style="display:flex;gap:10px;margin-bottom:14px">
+          <button class="btn btn-ghost btn-sm" onclick="selectAllLabels(true)">Seleccionar todo</button>
+          <button class="btn btn-ghost btn-sm" onclick="selectAllLabels(false)">Ninguno</button>
+        </div>
+        <div id="labelPickList"></div>
+      </div>
+      <div class="action-bar">
+        <button class="btn btn-primary" onclick="generateLabelsPDF()">
+          🏷 Generar Hoja de Etiquetas PDF
+        </button>
       </div>
     </div>
 
@@ -1216,7 +1258,18 @@
     <div class="modal-title">Nuevo Material</div>
     <div class="form-row"><div><label>Nombre del material</label><input id="m-matname" type="text" placeholder="Ej. Ball Valve 1/2&quot; CPVC"></div></div>
     <div class="form-row cols-2">
-      <div><label>Precio HD ($)</label><input id="m-matprice" type="number" step="0.01" placeholder="0.00"></div>
+      <div><label>SKU</label><input id="m-matsku" type="text" placeholder="Ej. 1004138153"></div>
+      <div>
+        <label>Proveedor</label>
+        <select id="m-matvendor">
+          <option value="HD">Home Depot</option>
+          <option value="HQJ">HQJ Plumbing</option>
+          <option value="Otro">Otro</option>
+        </select>
+      </div>
+    </div>
+    <div class="form-row cols-2">
+      <div><label>Precio Proveedor ($)</label><input id="m-matprice" type="number" step="0.01" placeholder="0.00"></div>
       <div><label>Unidad</label><input id="m-matunit" type="text" placeholder="Ej. Each, Pie, Rollo"></div>
     </div>
     <div id="m-matcalc" style="font-family:'DM Mono',monospace;font-size:12px;color:var(--muted);margin-top:4px"></div>
