@@ -361,8 +361,9 @@ function deleteClient(id) {
 
 // ── MATERIALS ────────────────────────────────────────────────
 function openMaterialModal() {
-  ['m-matname','m-matunit'].forEach(id => document.getElementById(id).value = '');
+  ['m-matname','m-matunit','m-matsku'].forEach(id => document.getElementById(id).value = '');
   document.getElementById('m-matprice').value = '';
+  document.getElementById('m-matvendor').value = 'HD';
   document.getElementById('m-matcalc').textContent = '';
   document.getElementById('modal-material').classList.add('open');
 }
@@ -373,7 +374,7 @@ function updateMatCalc() {
     const markup = (STATE.markup / 100) + 1;
     const final = hd * 1.115 * markup;
     document.getElementById('m-matcalc').textContent =
-      `HD $${hd.toFixed(2)} × 1.115 IVU × ${markup.toFixed(2)} markup = $${final.toFixed(2)} precio final`;
+      `$${hd.toFixed(2)} × 1.115 IVU × ${markup.toFixed(2)} markup = $${final.toFixed(2)} precio final`;
   }
 }
 
@@ -383,6 +384,8 @@ async function saveMaterial() {
   const mat = {
     id: Date.now(),
     name:    document.getElementById('m-matname').value.trim(),
+    sku:     document.getElementById('m-matsku').value.trim(),
+    vendor:  document.getElementById('m-matvendor').value,
     hdPrice: hd,
     unit:    document.getElementById('m-matunit').value.trim() || 'Each',
     finalPrice: parseFloat((hd * 1.115 * markup).toFixed(2)),
@@ -396,16 +399,43 @@ async function saveMaterial() {
   showToast('Material guardado ✓');
 }
 
+function vendorBadge(vendor) {
+  const colors = { HD: '#f96302', HQJ: '#c0392b', Otro: '#8a8577' };
+  const c = colors[vendor] || colors.Otro;
+  return `<span style="background:${c};color:white;font-size:9px;font-weight:700;padding:1px 6px;border-radius:3px;font-family:'DM Mono',monospace;margin-right:6px">${vendor||'—'}</span>`;
+}
+
 function renderMaterialList() {
   const el = document.getElementById('materialList');
+  const searchEl = document.getElementById('materialSearch');
+  const vendorEl = document.getElementById('vendorFilter');
+  const search = (searchEl ? searchEl.value : '').toLowerCase().trim();
+  const vendorFilter = vendorEl ? vendorEl.value : '';
+
+  let list = STATE.materials;
+  if (search) {
+    list = list.filter(m =>
+      m.name.toLowerCase().includes(search) ||
+      (m.sku || '').toLowerCase().includes(search)
+    );
+  }
+  if (vendorFilter) {
+    list = list.filter(m => (m.vendor || 'HD') === vendorFilter);
+  }
+
   if (!STATE.materials.length) {
-    el.innerHTML = '<div style="color:var(--muted);font-size:13px;">Sin materiales en catálogo.</div>';
+    el.innerHTML = '<div style="color:var(--muted);font-size:13px;">Sin materiales en catálogo. Usa "Importar" para cargar tu lista.</div>';
     return;
   }
-  el.innerHTML = STATE.materials.map(m => `
+  if (!list.length) {
+    el.innerHTML = '<div style="color:var(--muted);font-size:13px;">Sin resultados.</div>';
+    return;
+  }
+  el.innerHTML = `<div style="font-size:11px;color:var(--muted);margin-bottom:8px;font-family:'DM Mono',monospace">${list.length} de ${STATE.materials.length} materiales</div>` +
+    list.map(m => `
     <div class="material-item">
-      <div><strong>${m.name}</strong> <span style="color:var(--muted);font-size:11px">${m.unit}</span></div>
-      <div style="font-family:'DM Mono',monospace;font-size:12px;color:var(--muted)">HD $${m.hdPrice.toFixed(2)}</div>
+      <div>${vendorBadge(m.vendor||'HD')}<strong>${m.name}</strong> <span style="color:var(--muted);font-size:11px">${m.unit}${m.sku ? ' · SKU ' + m.sku : ''}</span></div>
+      <div style="font-family:'DM Mono',monospace;font-size:12px;color:var(--muted)">$${m.hdPrice.toFixed(2)}</div>
       <div style="font-family:'DM Mono',monospace;font-size:13px;font-weight:600;color:var(--accent)">$${m.finalPrice.toFixed(2)}</div>
       <button class="btn btn-ghost btn-sm" onclick="deleteMaterial(${m.id})">✕</button>
     </div>
@@ -416,6 +446,50 @@ function deleteMaterial(id) {
   STATE.materials = STATE.materials.filter(m => m.id !== id);
   saveLocal('materials');
   renderMaterialList();
+}
+
+// ── IMPORT MATERIALS ─────────────────────────────────────────
+async function importMaterials(event) {
+  const file = event.target.files[0];
+  if (!file) return;
+  const text = await file.text();
+  let items;
+  try {
+    items = JSON.parse(text);
+  } catch (e) {
+    showToast('Archivo inválido', true);
+    return;
+  }
+  if (!Array.isArray(items)) { showToast('Formato inválido', true); return; }
+
+  let added = 0, skipped = 0;
+  const existingKeys = new Set(STATE.materials.map(m => (m.sku||'') + '|' + (m.vendor||'HD')).filter(k => k !== '|HD'));
+
+  for (const item of items) {
+    const key = (item.sku||'') + '|' + (item.vendor||'HD');
+    if (item.sku && existingKeys.has(key)) { skipped++; continue; }
+    const mat = {
+      id: item.id || Date.now() + added,
+      name: item.name,
+      sku: item.sku || '',
+      vendor: item.vendor || 'HD',
+      hdPrice: item.hdPrice,
+      unit: item.unit || 'Each',
+      finalPrice: item.finalPrice || parseFloat((item.hdPrice * 1.115 * (1 + STATE.markup/100)).toFixed(2)),
+    };
+    STATE.materials.push(mat);
+    if (mat.sku) existingKeys.add(key);
+    added++;
+  }
+  saveLocal('materials');
+  if (STATE.gasUrl) {
+    for (const m of STATE.materials.slice(-added)) {
+      await pushToSheets('Materials', m);
+    }
+  }
+  renderAllLists();
+  showToast(`${added} materiales importados${skipped ? `, ${skipped} duplicados omitidos` : ''} ✓`);
+  event.target.value = '';
 }
 
 function openMaterialPicker() {
@@ -1410,3 +1484,112 @@ async function buildWorkOrderPDF(doc) {
   doc.text('Firma del Cliente', 120, y+17);
   doc.text('Nombre: ______________________', 120, y+22);
 }
+
+// ══════════════════════════════════════════════════════════════
+// LABEL PRINTING
+// ══════════════════════════════════════════════════════════════
+
+function renderLabelPicker() {
+  const el = document.getElementById('labelPickList');
+  if (!STATE.materials.length) {
+    el.innerHTML = '<div style="color:var(--muted);font-size:13px;">Sin materiales. Añade o importa primero.</div>';
+    return;
+  }
+  el.innerHTML = STATE.materials.map(m => `
+    <label class="material-item" style="cursor:pointer">
+      <div style="display:flex;align-items:center;gap:10px">
+        <input type="checkbox" class="label-pick" value="${m.id}" style="width:16px;height:16px;accent-color:var(--steel)">
+        <div>${vendorBadge(m.vendor||'HD')}<strong>${m.name}</strong> <span style="color:var(--muted);font-size:11px">${m.sku ? 'SKU '+m.sku : 'sin SKU'}</span></div>
+      </div>
+      <div></div>
+      <div style="font-family:'DM Mono',monospace;font-size:13px;font-weight:600">$${m.finalPrice.toFixed(2)}</div>
+      <div></div>
+    </label>
+  `).join('');
+}
+
+function selectAllLabels(state) {
+  document.querySelectorAll('.label-pick').forEach(cb => cb.checked = state);
+}
+
+async function generateLabelsPDF() {
+  const checked = Array.from(document.querySelectorAll('.label-pick:checked')).map(cb => cb.value);
+  if (!checked.length) { showToast('Selecciona al menos un material', true); return; }
+  const items = STATE.materials.filter(m => checked.includes(String(m.id)));
+
+  showToast('Generando etiquetas…');
+  const { jsPDF } = window.jspdf;
+  const doc = new jsPDF({ orientation: 'landscape', unit: 'in', format: [4, 2] });
+
+  for (let i = 0; i < items.length; i++) {
+    if (i > 0) doc.addPage([4, 2], 'landscape');
+    const m = items[i];
+    buildLabelPage(doc, m);
+  }
+
+  doc.save(`PG_etiquetas_${new Date().toISOString().split('T')[0]}.pdf`);
+  showToast(`${items.length} etiquetas generadas ✓`);
+}
+
+function buildLabelPage(doc, m) {
+  // Border
+  doc.setDrawColor(0);
+  doc.setLineWidth(0.01);
+  doc.rect(0.05, 0.05, 3.9, 1.9);
+
+  // Company name top
+  doc.setFont('helvetica', 'bold');
+  doc.setFontSize(8);
+  doc.text('PRECISION GRIND', 0.15, 0.25);
+
+  // Vendor tag
+  doc.setFont('helvetica', 'bold');
+  doc.setFontSize(7);
+  doc.setTextColor(150, 150, 150);
+  doc.text(m.vendor || 'HD', 3.75, 0.25, { align: 'right' });
+  doc.setTextColor(0, 0, 0);
+
+  // Material name
+  doc.setFont('helvetica', 'bold');
+  doc.setFontSize(11);
+  const nameLines = doc.splitTextToSize(m.name, 3.6);
+  doc.text(nameLines.slice(0, 2), 0.15, 0.45);
+
+  // Price
+  doc.setFont('helvetica', 'bold');
+  doc.setFontSize(16);
+  doc.setTextColor(192, 57, 43);
+  doc.text('$' + m.finalPrice.toFixed(2), 0.15, 1.15);
+  doc.setTextColor(0, 0, 0);
+
+  // Unit + SKU
+  doc.setFont('helvetica', 'normal');
+  doc.setFontSize(8);
+  doc.text(`Unidad: ${m.unit}`, 0.15, 1.35);
+  doc.text(`SKU: ${m.sku || '—'}`, 0.15, 1.48);
+
+  // Barcode
+  if (m.sku) {
+    try {
+      const canvas = document.createElement('canvas');
+      JsBarcode(canvas, m.sku, {
+        format: 'CODE128',
+        width: 2,
+        height: 40,
+        displayValue: false,
+        margin: 0,
+      });
+      const imgData = canvas.toDataURL('image/png');
+      doc.addImage(imgData, 'PNG', 0.15, 1.55, 3.6, 0.3);
+    } catch (e) {
+      console.warn('Barcode generation failed for SKU', m.sku, e);
+    }
+  }
+}
+
+// Hook into navigation to render label picker when shown
+const _origShowView = showView;
+showView = function(id) {
+  _origShowView(id);
+  if (id === 'labels') renderLabelPicker();
+};
