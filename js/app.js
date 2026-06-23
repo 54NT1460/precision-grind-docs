@@ -63,6 +63,9 @@ function saveAll() {
 }
 
 // ── GOOGLE SHEETS SYNC ──────────────────────────────────────
+let _autoSyncTimer = null;
+let _isSyncing = false;
+
 async function gasRequest(action, data = {}) {
   if (!STATE.gasUrl) return null;
   try {
@@ -79,31 +82,86 @@ async function checkSync() {
   const res = await gasRequest('ping');
   const dot = document.getElementById('syncDot');
   const label = document.getElementById('syncLabel');
+  const btn = document.getElementById('syncBtn');
   if (res && res.ok) {
     dot.classList.add('connected');
-    label.textContent = 'Conectado · Google Sheets';
+    label.textContent = 'Conectado';
+    btn.style.display = 'inline-block';
     document.getElementById('sheetsStatus').className = 'alert alert-info';
     document.getElementById('sheetsStatus').textContent = '✓ Conectado y sincronizando con Google Sheets.';
     await pullFromSheets();
+    startAutoSync();
   } else {
     dot.classList.remove('connected');
     label.textContent = 'Sin conexión';
+    btn.style.display = 'none';
   }
 }
 
-async function pullFromSheets() {
+function startAutoSync() {
+  if (_autoSyncTimer) clearInterval(_autoSyncTimer);
+  // Pull fresh data from Sheets every 30 seconds
+  _autoSyncTimer = setInterval(async () => {
+    if (_isSyncing) return;
+    _isSyncing = true;
+    await pullFromSheets(true); // silent = true
+    _isSyncing = false;
+  }, 30000);
+}
+
+async function forcSync() {
+  if (_isSyncing) return;
+  const btn = document.getElementById('syncBtn');
+  btn.textContent = '↻ …';
+  _isSyncing = true;
+  await pullFromSheets(false); // show toast
+  _isSyncing = false;
+  btn.textContent = '↻ Sync';
+}
+
+async function pullFromSheets(silent = false) {
   const res = await gasRequest('getAll');
   if (!res) return;
-  if (res.clients)    { STATE.clients = res.clients;    saveLocal('clients'); }
-  if (res.materials)  { STATE.materials = res.materials; saveLocal('materials'); }
-  if (res.laborRates) { STATE.laborRates = res.laborRates; saveLocal('laborRates'); }
-  if (res.recentDocs) { STATE.recentDocs = res.recentDocs; saveLocal('recentDocs'); }
-  if (res.counters)   { STATE.counters = res.counters;  saveLocal('counters'); }
-  if (res.markup)     { STATE.markup = parseFloat(res.markup); saveLocal('markup'); }
-  renderAllLists();
-  updateDocNumber();
-  document.getElementById('markupInput').value = STATE.markup;
-  document.getElementById('markupDisplay').textContent = STATE.markup;
+
+  let changed = false;
+
+  if (res.clients && JSON.stringify(res.clients) !== JSON.stringify(STATE.clients)) {
+    STATE.clients = res.clients; saveLocal('clients'); changed = true;
+  }
+  if (res.materials && res.materials.length > 0 && JSON.stringify(res.materials) !== JSON.stringify(STATE.materials)) {
+    STATE.materials = res.materials; saveLocal('materials'); changed = true;
+  }
+  if (res.laborRates && JSON.stringify(res.laborRates) !== JSON.stringify(STATE.laborRates)) {
+    STATE.laborRates = res.laborRates; saveLocal('laborRates'); changed = true;
+  }
+  if (res.recentDocs && JSON.stringify(res.recentDocs) !== JSON.stringify(STATE.recentDocs)) {
+    STATE.recentDocs = res.recentDocs; saveLocal('recentDocs'); changed = true;
+  }
+  if (res.counters && JSON.stringify(res.counters) !== JSON.stringify(STATE.counters)) {
+    STATE.counters = res.counters; saveLocal('counters'); changed = true;
+  }
+  if (res.markup) {
+    const m = parseFloat(res.markup);
+    if (m !== STATE.markup) {
+      STATE.markup = m; saveLocal('markup');
+      document.getElementById('markupInput').value = m;
+      document.getElementById('markupDisplay').textContent = m;
+      changed = true;
+    }
+  }
+
+  if (changed) {
+    renderAllLists();
+    updateDocNumber();
+    if (!silent) showToast('Sincronizado ✓');
+  } else {
+    if (!silent) showToast('Al día — sin cambios');
+  }
+
+  // Show last sync time in topbar
+  const now = new Date();
+  const t = now.toLocaleTimeString('es-PR', { hour: '2-digit', minute: '2-digit' });
+  document.getElementById('syncLabel').textContent = `Sync ${t}`;
 }
 
 async function pushToSheets(sheet, row) {
@@ -734,7 +792,15 @@ async function saveDoc(type) {
 
   STATE.recentDocs.push(docData);
   saveLocal('recentDocs');
-  if (STATE.gasUrl) await pushToSheets('Docs', docData);
+
+  // Increment counter and push BOTH the doc AND the new counter to Sheets
+  // so all other devices know the next available number immediately
+  incrementCounter();
+
+  if (STATE.gasUrl) {
+    await pushToSheets('Docs', docData);
+    await gasRequest('setCounter', STATE.counters);
+  }
   showToast(`${num} guardado ✓`);
 }
 
