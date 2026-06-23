@@ -69,9 +69,21 @@ let _isSyncing = false;
 async function gasRequest(action, data = {}) {
   if (!STATE.gasUrl) return null;
   try {
-    const url = STATE.gasUrl + '?action=' + action + '&data=' + encodeURIComponent(JSON.stringify(data));
-    const resp = await fetch(url);
-    return await resp.json();
+    // Use POST for batch operations (avoids URL length limits on iOS Safari)
+    const bigActions = ['appendBatch', 'clearSheet', 'deleteRow', 'append', 'update', 'setCounter', 'setMarkup'];
+    if (bigActions.includes(action)) {
+      const resp = await fetch(STATE.gasUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'text/plain' },
+        body: JSON.stringify({ action, data }),
+      });
+      return await resp.json();
+    } else {
+      // GET for read operations (ping, getAll, getSheet)
+      const url = STATE.gasUrl + '?action=' + action + '&data=' + encodeURIComponent(JSON.stringify(data));
+      const resp = await fetch(url);
+      return await resp.json();
+    }
   } catch (e) {
     console.warn('GAS error:', e);
     return null;
@@ -190,21 +202,43 @@ async function pullFromSheets(silent = false, force = false) {
   document.getElementById('syncLabel').textContent = `Sync ${t}`;
 }
 
-// Push the full local catalog up to Sheets (used after bulk import)
+// Push the full local catalog up to Sheets
 async function writeAllToSheets() {
-  if (!STATE.gasUrl) return;
-  showToast('Subiendo a Sheets…');
-  // Clear and rewrite Materials sheet
+  if (!STATE.gasUrl) { showToast('No conectado a Sheets', true); return; }
+
+  const matCount = STATE.materials.length;
+  const labCount = STATE.laborRates.length;
+
+  if (matCount === 0 && labCount === 0) {
+    showToast('Sin datos locales para subir', true);
+    return;
+  }
+
+  showToast(`Subiendo ${matCount} mat + ${labCount} tarifas…`);
+
+  // Materials — clear then write in batches of 25
   await gasRequest('clearSheet', { sheet: 'Materials' });
-  for (let i = 0; i < STATE.materials.length; i += 50) {
-    await gasRequest('appendBatch', { sheet: 'Materials', rows: STATE.materials.slice(i, i + 50) });
+  for (let i = 0; i < STATE.materials.length; i += 25) {
+    const batch = STATE.materials.slice(i, i + 25);
+    const res = await gasRequest('appendBatch', { sheet: 'Materials', rows: batch });
+    if (!res || !res.ok) {
+      showToast(`Error al subir materiales (batch ${i/25 + 1})`, true);
+      return;
+    }
   }
-  // Clear and rewrite LaborRates sheet
+
+  // LaborRates — clear then write in batches of 25
   await gasRequest('clearSheet', { sheet: 'LaborRates' });
-  for (let i = 0; i < STATE.laborRates.length; i += 50) {
-    await gasRequest('appendBatch', { sheet: 'LaborRates', rows: STATE.laborRates.slice(i, i + 50) });
+  for (let i = 0; i < STATE.laborRates.length; i += 25) {
+    const batch = STATE.laborRates.slice(i, i + 25);
+    const res = await gasRequest('appendBatch', { sheet: 'LaborRates', rows: batch });
+    if (!res || !res.ok) {
+      showToast(`Error al subir tarifas (batch ${i/25 + 1})`, true);
+      return;
+    }
   }
-  showToast(`${STATE.materials.length} materiales + ${STATE.laborRates.length} tarifas subidas a Sheets ✓`);
+
+  showToast(`✓ ${matCount} materiales + ${labCount} tarifas subidas a Sheets`);
 }
 
 async function pushToSheets(sheet, row) {
