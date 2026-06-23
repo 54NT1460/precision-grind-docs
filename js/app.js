@@ -114,32 +114,34 @@ async function forcSync() {
   const btn = document.getElementById('syncBtn');
   btn.textContent = '↻ …';
   _isSyncing = true;
-  await pullFromSheets(false); // show toast
+  await pullFromSheets(false, true); // silent=false, force=true
   _isSyncing = false;
   btn.textContent = '↻ Sync';
 }
 
-async function pullFromSheets(silent = false) {
+async function pullFromSheets(silent = false, force = false) {
+  // Step 1: get counters, docs, clients, markup (small data — safe in one call)
   const res = await gasRequest('getAll');
-  if (!res) return;
+  if (!res) {
+    if (!silent) showToast('Sin conexión con Sheets', true);
+    return;
+  }
 
   let changed = false;
 
-  // Rule: Sheets only wins if it has MORE items than local, or local is empty.
-  // This prevents a partial Sheets upload from wiping a full local catalog.
-  if (res.clients && res.clients.length > STATE.clients.length) {
-    STATE.clients = res.clients; saveLocal('clients'); changed = true;
+  // Clients — always safe to sync (small)
+  if (res.clients && Array.isArray(res.clients)) {
+    if (force || res.clients.length > STATE.clients.length) {
+      STATE.clients = res.clients; saveLocal('clients'); changed = true;
+    }
   }
-  if (res.materials && res.materials.length > STATE.materials.length) {
-    STATE.materials = res.materials; saveLocal('materials'); changed = true;
+  // Recent docs — take more
+  if (res.recentDocs && Array.isArray(res.recentDocs)) {
+    if (force || res.recentDocs.length > STATE.recentDocs.length) {
+      STATE.recentDocs = res.recentDocs; saveLocal('recentDocs'); changed = true;
+    }
   }
-  if (res.laborRates && res.laborRates.length > STATE.laborRates.length) {
-    STATE.laborRates = res.laborRates; saveLocal('laborRates'); changed = true;
-  }
-  if (res.recentDocs && res.recentDocs.length > STATE.recentDocs.length) {
-    STATE.recentDocs = res.recentDocs; saveLocal('recentDocs'); changed = true;
-  }
-  // Counter: take whichever seq is higher (prevents duplicate doc numbers)
+  // Counter — always take highest seq
   if (res.counters && res.counters.seq > STATE.counters.seq) {
     STATE.counters = res.counters; saveLocal('counters'); changed = true;
   }
@@ -153,12 +155,28 @@ async function pullFromSheets(silent = false) {
     }
   }
 
+  // Step 2: fetch Materials separately (large — dedicated call)
+  const matRes = await gasRequest('getSheet', { sheet: 'Materials' });
+  if (matRes && Array.isArray(matRes.rows) && matRes.rows.length > 0) {
+    if (force || matRes.rows.length > STATE.materials.length) {
+      STATE.materials = matRes.rows; saveLocal('materials'); changed = true;
+    }
+  }
+
+  // Step 3: fetch LaborRates separately
+  const labRes = await gasRequest('getSheet', { sheet: 'LaborRates' });
+  if (labRes && Array.isArray(labRes.rows) && labRes.rows.length > 0) {
+    if (force || labRes.rows.length > STATE.laborRates.length) {
+      STATE.laborRates = labRes.rows; saveLocal('laborRates'); changed = true;
+    }
+  }
+
   if (changed) {
     renderAllLists();
     updateDocNumber();
-    if (!silent) showToast('Sincronizado ✓');
+    if (!silent) showToast(`Sincronizado — ${STATE.materials.length} mat · ${STATE.laborRates.length} tarifas ✓`);
   } else {
-    if (!silent) showToast('Al día — sin cambios');
+    if (!silent) showToast(`Al día — ${STATE.materials.length} mat · ${STATE.laborRates.length} tarifas`);
   }
 
   const now = new Date();
@@ -430,9 +448,16 @@ function renderClientList() {
 }
 
 function deleteClient(id) {
+  if (!confirm('¿Eliminar este cliente?')) return;
   STATE.clients = STATE.clients.filter(c => c.id !== id);
   saveLocal('clients');
   renderAllLists();
+  // Delete from Sheets by id, then overwrite to ensure clean state
+  if (STATE.gasUrl) {
+    gasRequest('deleteRow', { sheet: 'Clients', id }).then(() => {
+      // No further action needed — row deleted directly
+    });
+  }
   showToast('Cliente eliminado');
 }
 
@@ -523,6 +548,7 @@ function deleteMaterial(id) {
   STATE.materials = STATE.materials.filter(m => m.id !== id);
   saveLocal('materials');
   renderMaterialList();
+  if (STATE.gasUrl) gasRequest('deleteRow', { sheet: 'Materials', id });
 }
 
 function clearMaterials() {
@@ -679,9 +705,11 @@ function renderLaborList() {
 }
 
 function deleteLabor(id) {
+  if (!confirm('¿Eliminar esta tarifa?')) return;
   STATE.laborRates = STATE.laborRates.filter(l => l.id !== id);
   saveLocal('laborRates');
   renderLaborList();
+  if (STATE.gasUrl) gasRequest('deleteRow', { sheet: 'LaborRates', id });
 }
 
 function openLaborPicker() {
