@@ -1104,6 +1104,7 @@
         <div><div class="page-title">Materiales</div><div class="page-sub">Catálogo con precios HD Mayagüez</div></div>
         <div style="display:flex;gap:8px">
           <button class="btn btn-ghost btn-sm" onclick="document.getElementById('importFile').click()">📥 Importar</button>
+          <button class="btn btn-ghost btn-sm" onclick="clearMaterials()" style="color:var(--accent)">🗑 Limpiar</button>
           <button class="btn btn-primary btn-sm" onclick="openMaterialModal()">+ Nuevo</button>
         </div>
       </div>
@@ -1153,8 +1154,12 @@
     <div class="view" id="view-labor">
       <div class="page-header">
         <div><div class="page-title">Tarifas de Labor</div><div class="page-sub">Precios fijos por servicio</div></div>
-        <button class="btn btn-primary btn-sm" onclick="openLaborModal()">+ Nueva tarifa</button>
+        <div style="display:flex;gap:8px">
+          <button class="btn btn-ghost btn-sm" onclick="document.getElementById('importLaborFile').click()">📥 Importar</button>
+          <button class="btn btn-primary btn-sm" onclick="openLaborModal()">+ Nueva tarifa</button>
+        </div>
       </div>
+      <input type="file" id="importLaborFile" accept=".json" style="display:none" onchange="importLaborRates(event)">
       <div class="card">
         <div id="laborList"><div style="color:var(--muted);font-size:13px;">Sin tarifas guardadas.</div></div>
       </div>

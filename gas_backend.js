@@ -30,6 +30,13 @@ function doGet(e) {
     appendRow(data.sheet, data.row);
     result = { ok: true };
 
+  } else if (action === 'appendBatch') {
+    const rows = data.rows || [];
+    for (const row of rows) {
+      appendRow(data.sheet, row);
+    }
+    result = { ok: true, count: rows.length };
+
   } else if (action === 'update') {
     updateRow(data.sheet, data.id, data.data);
     result = { ok: true };
