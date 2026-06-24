@@ -313,7 +313,9 @@ function addItem(prefix, opts = {}) {
   row.className = 'item-row';
   row.id = id;
   row.innerHTML = `
-    <td class="col-desc"><input type="text" placeholder="Descripción" value="${opts.desc||''}" oninput="calcRowTotal('${id}','${prefix}')"></td>
+    <td class="col-desc">
+      <input type="text" placeholder="Descripción" value="${opts.desc||''}" oninput="calcRowTotal('${id}','${prefix}')">
+    </td>
     <td class="col-type">
       <select onchange="calcRowTotal('${id}','${prefix}')">
         <option value="labor" ${opts.type==='labor'?'selected':''}>Labor</option>
@@ -326,10 +328,46 @@ function addItem(prefix, opts = {}) {
     <td class="col-hd"><input type="number" value="${opts.hdPrice||''}" min="0" step="0.01" placeholder="HD $" oninput="calcHdPrice('${id}','${prefix}')"></td>
     <td class="col-price"><input type="number" value="${opts.price||''}" min="0" step="0.01" oninput="calcRowTotal('${id}','${prefix}')"></td>
     <td class="col-total item-total" id="${id}_total">$0.00</td>
-    <td class="col-del"><button class="del-btn" onclick="removeItem('${id}','${prefix}')">✕</button></td>
+    <td class="col-del" style="display:flex;gap:2px">
+      <button class="del-btn" title="Guardar en catálogo" onclick="saveItemToCatalog('${id}')" style="color:#aaa;font-size:11px">💾</button>
+      <button class="del-btn" onclick="removeItem('${id}','${prefix}')">✕</button>
+    </td>
   `;
   tbody.appendChild(row);
   if (opts.price) calcRowTotal(id, prefix);
+}
+
+function saveItemToCatalog(rowId) {
+  const row = document.getElementById(rowId);
+  const desc  = row.querySelector('.col-desc input').value.trim();
+  const type  = row.querySelector('.col-type select').value;
+  const unit  = row.querySelector('.col-unit input').value.trim() || 'Each';
+  const price = parseFloat(row.querySelector('.col-price input').value) || 0;
+  const hdPrice = parseFloat(row.querySelector('.col-hd input').value) || 0;
+
+  if (!desc || !price) { showToast('Completa descripción y precio antes de guardar', true); return; }
+
+  if (type === 'labor') {
+    const exists = STATE.laborRates.find(l => l.desc.toLowerCase() === desc.toLowerCase());
+    if (exists) { showToast('Ya existe en Tarifas Labor', true); return; }
+    const lab = { id: Date.now(), desc, price, unit };
+    STATE.laborRates.push(lab);
+    saveLocal('laborRates');
+    if (STATE.gasUrl) pushToSheets('LaborRates', lab);
+    renderLaborList();
+    showToast(`"${desc}" guardado en Tarifas Labor ✓`);
+  } else {
+    const exists = STATE.materials.find(m => m.name.toLowerCase() === desc.toLowerCase());
+    if (exists) { showToast('Ya existe en Materiales', true); return; }
+    const markup = (STATE.markup / 100) + 1;
+    const finalPrice = hdPrice > 0 ? parseFloat((hdPrice * 1.115 * markup).toFixed(2)) : price;
+    const mat = { id: Date.now(), name: desc, sku: '', vendor: 'Otro', hdPrice: hdPrice || price, unit, finalPrice };
+    STATE.materials.push(mat);
+    saveLocal('materials');
+    if (STATE.gasUrl) pushToSheets('Materials', mat);
+    renderMaterialList();
+    showToast(`"${desc}" guardado en Materiales ✓`);
+  }
 }
 
 function calcHdPrice(rowId, prefix) {
@@ -709,30 +747,100 @@ async function importLaborRates(event) {
   if (STATE.gasUrl) await writeAllToSheets();
 }
 
-function openMaterialPicker() {
-  const el = document.getElementById('materialPickerList');
-  if (!STATE.materials.length) {
-    el.innerHTML = '<div style="color:var(--muted);font-size:13px;">No hay materiales. Añade en la sección Materiales.</div>';
-  } else {
-    el.innerHTML = STATE.materials.map(m => `
-      <div class="client-item" style="cursor:pointer" onclick="pickMaterial(${m.id})">
-        <div>
-          <div class="client-name">${m.name}</div>
-          <div class="client-detail">${m.unit} · HD $${m.hdPrice.toFixed(2)} → <strong>$${m.finalPrice.toFixed(2)}</strong></div>
-        </div>
-        <button class="btn btn-primary btn-sm">+ Añadir</button>
-      </div>
-    `).join('');
-  }
+function handleOverlayClick(event, name) {
+  // Close modal when clicking the dark overlay background (not the modal itself)
+  if (event.target === event.currentTarget) closeModal(name);
+}
+
+// ── MATERIAL PICKER ───────────────────────────────────────────
+let _matPickerTarget = 'fac'; // which form to add to
+
+function openMaterialPicker(target) {
+  _matPickerTarget = target || 'fac';
+  document.getElementById('materialPickerSearch').value = '';
+  renderMaterialPickerList('');
   document.getElementById('modal-materialpicker').classList.add('open');
+  setTimeout(() => document.getElementById('materialPickerSearch').focus(), 100);
+}
+
+function filterMaterialPicker() {
+  renderMaterialPickerList(document.getElementById('materialPickerSearch').value);
+}
+
+function renderMaterialPickerList(search) {
+  const el = document.getElementById('materialPickerList');
+  const q = (search || '').toLowerCase().trim();
+  let list = STATE.materials;
+  if (q) list = list.filter(m => m.name.toLowerCase().includes(q) || (m.sku||'').toLowerCase().includes(q));
+  if (!list.length) {
+    el.innerHTML = `<div style="color:var(--muted);font-size:13px;padding:12px 0">${STATE.materials.length ? 'Sin resultados.' : 'Sin materiales en catálogo.'}</div>`;
+    return;
+  }
+  el.innerHTML = list.slice(0, 80).map(m => `
+    <div class="client-item" style="cursor:pointer" onclick="pickMaterial(${m.id})">
+      <div>
+        <div class="client-name">${m.name}</div>
+        <div class="client-detail">${vendorBadge(m.vendor||'HD')} ${m.unit} · $${m.finalPrice.toFixed(2)}</div>
+      </div>
+      <button class="btn btn-primary btn-sm" onclick="event.stopPropagation();pickMaterial(${m.id})">+ Add</button>
+    </div>
+  `).join('') + (list.length > 80 ? `<div style="color:var(--muted);font-size:12px;padding:8px">Mostrando 80 de ${list.length} — refine la búsqueda</div>` : '');
 }
 
 function pickMaterial(id) {
   const m = STATE.materials.find(x => x.id === id);
   if (!m) return;
-  addItem('fac', { desc: m.name, type: 'material', qty: 1, unit: m.unit, hdPrice: m.hdPrice, price: m.finalPrice });
-  calcFacTotal();
+  addItem(_matPickerTarget, { desc: m.name, type: 'material', qty: 1, unit: m.unit, hdPrice: m.hdPrice, price: m.finalPrice });
+  if (_matPickerTarget === 'cot') calcCotTotal();
+  else calcFacTotal();
   closeModal('materialpicker');
+}
+
+// ── LABOR PICKER ─────────────────────────────────────────────
+let _labPickerTarget = 'fac';
+
+function openLaborPicker(target) {
+  _labPickerTarget = target || 'fac';
+  document.getElementById('laborPickerSearch').value = '';
+  renderLaborPickerList('');
+  document.getElementById('modal-laborpicker').classList.add('open');
+  setTimeout(() => document.getElementById('laborPickerSearch').focus(), 100);
+}
+
+function filterLaborPicker() {
+  renderLaborPickerList(document.getElementById('laborPickerSearch').value);
+}
+
+function renderLaborPickerList(search) {
+  const el = document.getElementById('laborPickerList');
+  const q = (search || '').toLowerCase().trim();
+  let list = STATE.laborRates;
+  if (q) list = list.filter(l => l.desc.toLowerCase().includes(q));
+  if (!list.length) {
+    el.innerHTML = `<div style="color:var(--muted);font-size:13px;padding:12px 0">${STATE.laborRates.length ? 'Sin resultados.' : 'Sin tarifas guardadas.'}</div>`;
+    return;
+  }
+  el.innerHTML = list.slice(0, 80).map(l => `
+    <div class="client-item" style="cursor:pointer" onclick="pickLabor(${l.id})">
+      <div>
+        <div class="client-name">${l.desc}</div>
+        <div class="client-detail">${l.unit}</div>
+      </div>
+      <div style="display:flex;align-items:center;gap:8px">
+        <strong style="font-family:'DM Mono',monospace">$${l.price.toFixed(2)}</strong>
+        <button class="btn btn-primary btn-sm" onclick="event.stopPropagation();pickLabor(${l.id})">+ Add</button>
+      </div>
+    </div>
+  `).join('');
+}
+
+function pickLabor(id) {
+  const l = STATE.laborRates.find(x => x.id === id);
+  if (!l) return;
+  addItem(_labPickerTarget, { desc: l.desc, type: 'labor', qty: 1, unit: l.unit, price: l.price });
+  if (_labPickerTarget === 'cot') calcCotTotal();
+  else calcFacTotal();
+  closeModal('laborpicker');
 }
 
 // ── LABOR RATES ──────────────────────────────────────────────
@@ -775,41 +883,13 @@ function renderLaborList() {
 }
 
 function deleteLabor(id) {
-  if (!confirm('¿Eliminar esta tarifa?')) return;
   STATE.laborRates = STATE.laborRates.filter(l => l.id !== id);
   saveLocal('laborRates');
   renderLaborList();
   if (STATE.gasUrl) gasRequest('deleteRow', { sheet: 'LaborRates', id });
+  showToast('Tarifa eliminada');
 }
 
-function openLaborPicker() {
-  const el = document.getElementById('laborPickerList');
-  if (!STATE.laborRates.length) {
-    el.innerHTML = '<div style="color:var(--muted);font-size:13px;">No hay tarifas. Añade en Tarifas Labor.</div>';
-  } else {
-    el.innerHTML = STATE.laborRates.map(l => `
-      <div class="client-item" style="cursor:pointer" onclick="pickLabor(${l.id})">
-        <div>
-          <div class="client-name">${l.desc}</div>
-          <div class="client-detail">${l.unit}</div>
-        </div>
-        <div style="display:flex;align-items:center;gap:10px">
-          <strong style="font-family:'DM Mono',monospace">$${l.price.toFixed(2)}</strong>
-          <button class="btn btn-primary btn-sm">+ Añadir</button>
-        </div>
-      </div>
-    `).join('');
-  }
-  document.getElementById('modal-laborpicker').classList.add('open');
-}
-
-function pickLabor(id) {
-  const l = STATE.laborRates.find(x => x.id === id);
-  if (!l) return;
-  addItem('fac', { desc: l.desc, type: 'labor', qty: 1, unit: l.unit, price: l.price });
-  calcFacTotal();
-  closeModal('laborpicker');
-}
 
 // ── RECENT DOCS ──────────────────────────────────────────────
 function renderRecentDocs() {
