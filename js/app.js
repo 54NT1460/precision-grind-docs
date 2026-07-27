@@ -8,6 +8,8 @@ const STATE = {
   materials: [],
   laborRates: [],
   recentDocs: [],
+  docDetails: {}, // id -> {fields, items} — LOCAL ONLY, never synced to Sheets.
+                  // Keeps recentDocs (which syncs) small: summary only.
   markup: 25,
   counters: { year: null, quarter: null, seq: 1 },
   gasUrl: '',
@@ -45,13 +47,21 @@ document.addEventListener('DOMContentLoaded', () => {
 
 // ── LOCAL STORAGE ───────────────────────────────────────────
 function loadLocal() {
-  const keys = ['clients','materials','laborRates','recentDocs','markup','counters','gasUrl'];
+  const keys = ['clients','materials','laborRates','recentDocs','docDetails','markup','counters','gasUrl'];
   keys.forEach(k => {
     const v = localStorage.getItem('pg_' + k);
     if (v !== null) {
       try { STATE[k] = JSON.parse(v); } catch(e) { STATE[k] = v; }
     }
   });
+  // Migration: older docs saved before the paid-tracking rebuild have no
+  // unique id. Backfill one so toggling paid / duplicating always works.
+  let migrated = false;
+  STATE.recentDocs.forEach(d => {
+    if (!d.id) { d.id = Date.now() + Math.floor(Math.random() * 1000); migrated = true; }
+  });
+  if (migrated) saveLocal('recentDocs');
+  if (!STATE.docDetails || typeof STATE.docDetails !== 'object') STATE.docDetails = {};
 }
 
 function saveLocal(key) {
@@ -59,7 +69,7 @@ function saveLocal(key) {
 }
 
 function saveAll() {
-  ['clients','materials','laborRates','recentDocs','markup','counters','gasUrl'].forEach(k => saveLocal(k));
+  ['clients','materials','laborRates','recentDocs','docDetails','markup','counters','gasUrl'].forEach(k => saveLocal(k));
 }
 
 // ── GOOGLE SHEETS SYNC ──────────────────────────────────────
@@ -314,7 +324,7 @@ function addItem(prefix, opts = {}) {
       <input type="text" placeholder="Descripción" value="${opts.desc||''}" oninput="calcRowTotal('${id}','${prefix}')">
     </td>
     <td class="col-type">
-      <select onchange="calcRowTotal('${id}','${prefix}')">
+      <select onchange="calcHdPrice('${id}','${prefix}')">
         <option value="labor" ${opts.type==='labor'?'selected':''}>Labor</option>
         <option value="material" ${opts.type==='material'?'selected':''}>Material</option>
         <option value="otro" ${opts.type==='otro'?'selected':''}>Otro</option>
@@ -367,13 +377,19 @@ function saveItemToCatalog(rowId) {
 
 function calcHdPrice(rowId, prefix) {
   const row = document.getElementById(rowId);
+  const type = row.querySelector('.col-type select').value;
   const hdInput = row.querySelector('.col-hd input');
   const priceInput = row.querySelector('.col-price input');
   const hdVal = parseFloat(hdInput.value) || 0;
   if (hdVal > 0) {
-    const markup = (STATE.markup / 100) + 1;
-    const final = hdVal * 1.115 * markup;
-    priceInput.value = final.toFixed(2);
+    if (type === 'labor') {
+      // Labor is IVU-exempt — no tax, no material markup on labor lines
+      priceInput.value = hdVal.toFixed(2);
+    } else {
+      const markup = (STATE.markup / 100) + 1;
+      const final = hdVal * 1.115 * markup;
+      priceInput.value = final.toFixed(2);
+    }
   }
   calcRowTotal(rowId, prefix);
 }
@@ -422,6 +438,12 @@ function calcCotTotal() {
 function toggleDepositCot() {
   const show = document.getElementById('cot-depositRequired').checked;
   document.getElementById('cot-depositFields').style.display = show ? '' : 'none';
+}
+
+function setFacDepositPct(pct) {
+  const sub = getSubtotal('fac');
+  document.getElementById('fac-deposit').value = (sub * pct / 100).toFixed(2);
+  calcFacTotal();
 }
 
 // ── FAC TOTALS ───────────────────────────────────────────────
@@ -890,9 +912,68 @@ function renderRecentDocs() {
       <div class="recent-client">${d.client}</div>
       <div class="recent-type">${d.type}</div>
       <div class="recent-amount">$${(d.total||0).toFixed(2)}</div>
-      <span class="badge badge-${d.paid?'paid':'pending'}">${d.paid?'PAGADO':'Pendiente'}</span>
+      ${d.type === 'factura'
+        ? `<span class="badge badge-${d.paid?'paid':'pending'}" style="cursor:pointer" onclick="toggleDocPaid(${d.id})" title="Toca para marcar ${d.paid?'pendiente':'pagada'}">${d.paid?'PAGADA':'Pendiente'}</span>`
+        : `<span class="badge badge-draft">${d.type === 'cotizacion' ? 'Cotización' : 'Orden'}</span>`}
     </div>
   `).join('');
+}
+
+// ── HISTORIAL (full list, search + paid filter, duplicate/convert) ──
+let _histFilter = 'all'; // all | pending | paid
+
+function setHistFilter(f) {
+  _histFilter = f;
+  document.querySelectorAll('.hist-filter-btn').forEach(b => b.classList.toggle('active', b.dataset.f === f));
+  renderHistorial();
+}
+
+function filterHistorial() { renderHistorial(); }
+
+function renderHistorial() {
+  const el = document.getElementById('historialList');
+  if (!el) return;
+  const searchEl = document.getElementById('histSearch');
+  const q = (searchEl ? searchEl.value : '').toLowerCase().trim();
+
+  let list = [...STATE.recentDocs].reverse();
+  if (q) list = list.filter(d => (d.client||'').toLowerCase().includes(q) || (d.num||'').toLowerCase().includes(q));
+  if (_histFilter === 'pending') list = list.filter(d => d.type === 'factura' && !d.paid);
+  if (_histFilter === 'paid') list = list.filter(d => d.type === 'factura' && d.paid);
+
+  if (!list.length) {
+    el.innerHTML = '<div style="color:var(--muted);font-size:13px;padding:12px 0;">Sin documentos.</div>';
+    return;
+  }
+
+  el.innerHTML = list.map(d => {
+    const dateStr = new Date(d.date).toLocaleDateString('es-PR', { year: '2-digit', month: 'short', day: 'numeric' });
+    const hasDetail = !!STATE.docDetails[d.id];
+    let badge;
+    if (d.type === 'factura') {
+      badge = `<span class="badge badge-${d.paid?'paid':'pending'}" style="cursor:pointer" onclick="toggleDocPaid(${d.id})">${d.paid?'PAGADA':'Pendiente'}</span>`;
+    } else if (d.type === 'cotizacion') {
+      badge = `<span class="badge badge-draft">Cotización</span>`;
+    } else {
+      badge = `<span class="badge badge-draft">Orden</span>`;
+    }
+    const actions = [];
+    if (hasDetail) actions.push(`<button class="btn btn-ghost btn-sm" onclick="duplicateDoc(${d.id})">⧉ Duplicar</button>`);
+    if (hasDetail && d.type === 'cotizacion') actions.push(`<button class="btn btn-ghost btn-sm" onclick="convertCotToFactura(${d.id})">→ Factura</button>`);
+    return `
+      <div class="hist-item">
+        <div class="hist-row1">
+          <span class="recent-num">${d.num}</span>
+          <span class="hist-client">${d.client || '—'}</span>
+          ${badge}
+        </div>
+        <div class="hist-row2">
+          <span class="hist-date">${dateStr}</span>
+          <span class="recent-amount">$${(d.total||0).toFixed(2)}</span>
+          <span class="hist-actions">${actions.join('')}</span>
+        </div>
+      </div>`;
+  }).join('');
 }
 
 // ── RENDER ALL ───────────────────────────────────────────────
@@ -902,6 +983,7 @@ function renderAllLists() {
   renderMaterialList();
   renderLaborList();
   renderRecentDocs();
+  renderHistorial();
 }
 
 // ── CLEAR FORMS ──────────────────────────────────────────────
@@ -942,29 +1024,75 @@ function clearForm(prefix) {
   showToast('Formulario limpiado');
 }
 
+// ── FORM FIELD SNAPSHOT (used by save/duplicate/convert) ──────
+function captureFields(ids) {
+  const out = {};
+  ids.forEach(id => {
+    const el = document.getElementById(id);
+    if (!el) return;
+    out[id] = (el.type === 'checkbox') ? el.checked : el.value;
+  });
+  return out;
+}
+
+function applyFields(fields) {
+  Object.keys(fields || {}).forEach(id => {
+    const el = document.getElementById(id);
+    if (!el) return;
+    if (el.type === 'checkbox') el.checked = fields[id];
+    else el.value = fields[id];
+  });
+}
+
+const COT_FIELD_IDS = ['cot-clientName','cot-project','cot-address','cot-phone','cot-email',
+  'cot-leader','cot-contact','cot-startDate','cot-endDate','cot-duration',
+  'cot-summary','cot-responsibilities','cot-depositRequired','cot-depositDesc','cot-budgetDesc'];
+
+const FAC_FIELD_IDS = ['fac-clientName','fac-project','fac-address','fac-phone','fac-email',
+  'fac-date','fac-payment','fac-deposit','fac-notes','guar-tipo','guar-fechas','guar-desc'];
+
+const WO_FIELD_IDS = ['wo-client','wo-tech','wo-address','wo-phone','wo-problem',
+  'wo-materials','wo-workdone','wo-extra','wo-warranty','wo-arrival','wo-departure'];
+
 // ── SAVE DOC ─────────────────────────────────────────────────
 async function saveDoc(type) {
   const num = docNumString();
-  let docData = { num, type, date: new Date().toISOString() };
+  const id = Date.now();
+  let docData = { id, num, type, date: new Date().toISOString(), paidDate: null };
+  let detail = { items: [], fields: {} };
 
   if (type === 'cotizacion') {
     docData.client = document.getElementById('cot-clientName').value;
     docData.total = getSubtotal('cot');
     docData.paid = false;
+    detail.items = getItemsData('cot');
+    detail.fields = captureFields(COT_FIELD_IDS);
   } else if (type === 'factura') {
     docData.client = document.getElementById('fac-clientName').value;
     const sub = getSubtotal('fac');
     const dep = parseFloat(document.getElementById('fac-deposit').value) || 0;
     docData.total = Math.max(0, sub - dep);
     docData.paid = document.getElementById('fac-paid').checked;
+    if (docData.paid) docData.paidDate = new Date().toISOString();
+    detail.items = getItemsData('fac');
+    detail.fields = captureFields(FAC_FIELD_IDS);
   } else if (type === 'workorder') {
     docData.client = document.getElementById('wo-client').value;
     docData.total = 0;
     docData.paid = false;
+    detail.fields = captureFields(WO_FIELD_IDS);
+    detail.fields['wo-type'] = Array.from(document.querySelectorAll('input[name="wo-type"]:checked')).map(cb => cb.value);
+    detail.fields['wo-complete'] = document.getElementById('wo-complete').checked;
+    detail.fields['wo-followup'] = document.getElementById('wo-followup').checked;
   }
 
   STATE.recentDocs.push(docData);
   saveLocal('recentDocs');
+
+  // Full item/field detail is LOCAL ONLY — never synced to Sheets.
+  // It powers Duplicar / Convertir a Factura on this device.
+  STATE.docDetails[id] = detail;
+  saveLocal('docDetails');
 
   // Increment counter and push BOTH the doc AND the new counter to Sheets
   // so all other devices know the next available number immediately
@@ -975,6 +1103,7 @@ async function saveDoc(type) {
     await gasRequest('setCounter', STATE.counters);
   }
   showToast(`${num} guardado ✓`);
+  renderAllLists();
 }
 
 // ── SETTINGS ─────────────────────────────────────────────────
@@ -1017,6 +1146,89 @@ function resetPaidToggle() {
   toggle.style.background = 'transparent';
   label.textContent = 'Marcar como PAGADA';
   label.style.color = '';
+}
+
+// ── MARK PAID (already-saved invoices, when payment arrives later) ──
+// This is separate from togglePaid() above, which only sets the initial
+// state before a factura is first saved. This one flips a doc that's
+// already sitting in Historial / Documentos Recientes.
+function toggleDocPaid(id) {
+  const doc = STATE.recentDocs.find(d => d.id === id);
+  if (!doc) return;
+  doc.paid = !doc.paid;
+  doc.paidDate = doc.paid ? new Date().toISOString() : null;
+  saveLocal('recentDocs');
+  renderAllLists();
+  renderHistorial();
+  showToast(doc.paid ? `${doc.num} marcada como PAGADA ✓` : `${doc.num} marcada como pendiente`);
+  if (STATE.gasUrl) {
+    // Only works if this doc's row in Sheets already has an 'id' column
+    // (true for anything saved since this update). Older synced rows
+    // silently no-op here — use "⬆ Subir clientes a Sheets" to re-push
+    // everything with ids once, which fixes it going forward.
+    updateSheets('Docs', id, { paid: doc.paid, paidDate: doc.paidDate });
+  }
+}
+
+// ── DUPLICAR DOCUMENTO ───────────────────────────────────────
+// Full item/field detail only exists on the device that created the doc
+// (docDetails is local-only, by design — see STATE comment). If a doc
+// synced in from another device, we can't reconstruct its line items.
+function duplicateDoc(id) {
+  const doc = STATE.recentDocs.find(d => d.id === id);
+  const detail = STATE.docDetails[id];
+  if (!doc || !detail) {
+    showToast('Este documento no tiene detalle en este dispositivo (creado en otro equipo)', true);
+    return;
+  }
+  const prefix = doc.type === 'cotizacion' ? 'cot' : (doc.type === 'factura' ? 'fac' : 'wo');
+  showView(doc.type === 'cotizacion' ? 'cotizacion' : (doc.type === 'factura' ? 'factura' : 'workorder'));
+
+  if (prefix === 'cot' || prefix === 'fac') {
+    document.getElementById(prefix + '-items').innerHTML = '';
+    itemCounts[prefix] = 0;
+    applyFields(detail.fields);
+    (detail.items || []).forEach(it => addItem(prefix, it));
+    if (prefix === 'cot') { toggleDepositCot(); calcCotTotal(); }
+    else { document.getElementById('fac-date').valueAsDate = new Date(); resetPaidToggle(); calcFacTotal(); }
+  } else {
+    applyFields(detail.fields);
+    document.querySelectorAll('input[name="wo-type"]').forEach(cb => {
+      cb.checked = (detail.fields['wo-type'] || []).includes(cb.value);
+    });
+    document.getElementById('wo-complete').checked = !!detail.fields['wo-complete'];
+    document.getElementById('wo-followup').checked = !!detail.fields['wo-followup'];
+    setTodayDates();
+  }
+  showToast(`Duplicado de ${doc.num} cargado — revisa y guarda para asignar nuevo número`);
+}
+
+// ── COTIZACIÓN → FACTURA ─────────────────────────────────────
+function convertCotToFactura(id) {
+  const doc = STATE.recentDocs.find(d => d.id === id);
+  const detail = STATE.docDetails[id];
+  if (!doc || doc.type !== 'cotizacion' || !detail) {
+    showToast('Este documento no tiene detalle en este dispositivo (creado en otro equipo)', true);
+    return;
+  }
+  showView('factura');
+  document.getElementById('fac-items').innerHTML = '';
+  itemCounts.fac = 0;
+
+  // Map cot-* fields to fac-* fields where names line up
+  document.getElementById('fac-clientName').value = detail.fields['cot-clientName'] || '';
+  document.getElementById('fac-project').value    = detail.fields['cot-project'] || '';
+  document.getElementById('fac-address').value    = detail.fields['cot-address'] || '';
+  document.getElementById('fac-phone').value      = detail.fields['cot-phone'] || '';
+  document.getElementById('fac-email').value      = detail.fields['cot-email'] || '';
+  document.getElementById('fac-notes').value      = detail.fields['cot-budgetDesc'] || '';
+
+  (detail.items || []).forEach(it => addItem('fac', it));
+  document.getElementById('fac-date').valueAsDate = new Date();
+  document.getElementById('fac-deposit').value = '';
+  resetPaidToggle();
+  calcFacTotal();
+  showToast(`Cotización ${doc.num} cargada en Factura — revisa y guarda para asignar nuevo número`);
 }
 
 function setCounter() {
